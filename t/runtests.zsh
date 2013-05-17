@@ -18,17 +18,19 @@ function die { warn $@; return 1 }
 
 # chdir to $DIST_ROOT
 bindir=$(cd $0:h; print $PWD)
-if [[ $bindir != */YATT/t ]]; then
-    cat 1>&2 <<EOF; exit 1
-YATT installation path problem!
-To use this t/runtests.zsh, your installation should end with 'YATT'.
-(You can achieve it like this: git clone ...  lib/YATT)
-EOF
-
+if [[ $bindir != */YATT/t ]] && [[ -d $bindir:h/_build/lib/YATT ]]; then
+    distdir=$bindir:h
+    libdir=$bindir:h/_build/lib
+    has_lib_yatt=1
+elif [[ $bindir == */YATT/t ]]; then
+    distdir=$bindir:h
+    libdir=$bindir:h:h
+    has_lib_yatt=1
+else
+    distdir=$bindir:h
+    has_lib_yatt=0; # or use $+libdir
 fi
 
-libdir=$bindir:h:h
-distdir=$bindir:h
 cd $distdir
 
 optspec=(
@@ -46,13 +48,15 @@ zparseopts -D -A opts $optspec || true
 
 if (($+opts[--samples])); then
     # Test samples only.
+    (($+libdir)) || die samples needs lib/YATT, sorry.
+
     argv=(samples/**/t/*.t(*N,@N))
 
 elif [[ -z $argv[(r)(*/)#*.t] ]]; then
     # If no **/*.t is specified:
     # To make relative path invocation happier.
     argv=(t/**/*.t(N))
-    if ((! $+opts[--nosamples])) && [[ -d samples ]]; then
+    if (($+libdir)) && ((! $+opts[--nosamples])) && [[ -d samples ]]; then
 	argv+=(samples/**/t/*.t(*N,@N))
     fi
 fi
@@ -176,7 +180,7 @@ if [[ -n $o_cover ]]; then
 
     harness+=(-MDevel::Cover=-db,$cover_db,${(j/,/)ignore})
 
-    harness+=(-I$libdir)
+    (($+libdir)) && harness+=(-I$libdir)
 
     if (($#o_lib)); then
 	for o val in $o_lib; do

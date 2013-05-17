@@ -3,20 +3,7 @@
 #----------------------------------------
 use strict;
 use warnings FATAL => qw(all);
-sub MY () {__PACKAGE__}
-use base qw(File::Spec);
-use File::Basename;
-
-use FindBin;
-sub untaint_any {$_[0] =~ m{(.*)} and $1}
-my $libdir;
-BEGIN {
-  unless (grep {$_ eq 'YATT'} MY->splitdir($FindBin::Bin)) {
-    die "Can't find YATT in runtime path: $FindBin::Bin\n";
-  }
-  $libdir = dirname(dirname(untaint_any($FindBin::Bin)));
-}
-use lib $libdir;
+use FindBin; BEGIN { do "$FindBin::Bin/t_lib.pl" }
 #----------------------------------------
 
 use Test::More;
@@ -24,12 +11,7 @@ use Test::More;
 chdir $FindBin::Bin
   or die "chdir to test dir failed: $!";
 
-my ($lib_yatt) = grep(-e "$_/YATT/Lite"
-		      , 'lib', @INC);
-
-unless (defined $lib_yatt) {
-  BAIL_OUT("lib/YATT is missing??");
-}
+my $dist_root = "$FindBin::Bin/..";
 
 use File::Find;
 
@@ -42,20 +24,20 @@ my %ignore; map ++$ignore{$_}, ();
 
 
 my @modules = ('YATT::Lite');
-my (%modules) = ('YATT::Lite' => "$lib_yatt/YATT/Lite.pm");
+my (%modules) = ('YATT::Lite' => "$dist_root/Lite.pm");
 find {
   no_chdir => 1,
   wanted => sub {
   my $name = $File::Find::name;
   return unless $name =~ m{\.pm$};
-  $name =~ s{^\Q$lib_yatt\E/}{};
+  $name =~ s{^\Q$dist_root\E/}{YATT/};
   $name =~ s{/}{::}g;
   $name =~ s{\.pm$}{}g;
   return if $ignore{$name};
   print "$File::Find::name => $name\n" if $ENV{VERBOSE};
   $modules{$name} = $File::Find::name;
   push @modules, untaint_any($name);
-}}, untaint_any("$lib_yatt/YATT/Lite");
+}}, untaint_any("$dist_root/Lite");
 
 plan tests => 3 * @modules;
 
