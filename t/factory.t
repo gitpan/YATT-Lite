@@ -124,6 +124,36 @@ my $root_sanity = sub {
 
 ++$i;
 {
+  my $THEME = "[read_config xhf, yml]";
+  my $approot = "$TMP/app$i";
+  my $docroot = "$approot/docs";
+
+  MY->mkfile("$docroot/.htyattconfig.xhf" => <<'END'
+base: @ytmpl
+other_config: in docroot
+END
+
+	     , "$docroot/yamltest/.htyattconfig.yml" => <<'END'
+---
+base: '@ytmpl'
+other_config: 'read from yml'
+END
+	     );
+
+  # In xhf, order must be preserved.
+  is_deeply [Factory->read_file("$docroot/.htyattconfig.xhf")]
+    , [base => '@ytmpl', other_config => 'in docroot']
+      , "Factory->read_file .htyattconfig.xhf";
+
+  # In yaml, order is not preserved.
+  is_deeply +{Factory->read_file("$docroot/yamltest/.htyattconfig.yml")}
+    , +{base => '@ytmpl', other_config => 'read from yml'}
+      , "Factory->read_file .htyattconfig.yml";
+
+}
+
+++$i;
+{
   my $THEME = "[config+rc]";
   # * root に config と rc があり、 config から ytmpl への継承が指定されているケース
   # * サブディレクトリ(config 無し)がデフォルト値を継承するケース
@@ -144,6 +174,14 @@ my $root_sanity = sub {
 base: @ytmpl
 other_config: in docroot
 END
+
+	     , "$docroot/yamltest/.htyattconfig.yml" => <<'END'
+---
+base: '@ytmpl'
+other_config: 'read from yml'
+END
+
+
 	     , "$docroot/.htyattrc.pl" => <<'END'
 use strict;
 use warnings FATAL => qw(all);
@@ -174,6 +212,9 @@ END
   
   is $yatt->bar, "my bar result", "$THEME root inherits ytmpl bar";
   ok($yatt->find_part('bar'), "$THEME inst part bar is visible");
+
+  is $F->get_yatt('/yamltest/')->cget('other_config')
+   , 'read from yml', "yaml support .htyattconfig.yml";
 }
 
 ++$i;
@@ -337,6 +378,35 @@ END
   # No such widget <yatt:common> at file /tmp/pFTOXbIAaa/app6/docs/bar.yatt line 1,
 
   # あと、Subroutine filename redefined になるケースがあるが、同じ現象か別か不明。
+}
+
+++$i;
+{
+  my $THEME = "[app.psgi loading]";
+  my $approot = "$TMP/app$i";
+  my $docroot = "$approot/html";
+
+  MY->mkfile("$approot/html/index.yatt", q|dummy|);
+
+  MY->mkfile(my $fn = "$approot/app.psgi", <<'END');
+use FindBin;
+use YATT::Lite::WebMVC0::SiteApp -as_base;
+
+return do {
+  my $site = MY->new(app_root => $FindBin::Bin
+		     , doc_root => "$FindBin::Bin/html");
+
+  if (MY->want_object) {
+    $site
+  } else {
+    $site->to_app;
+  }
+};
+
+END
+
+  ok(Factory->load_factory_script($fn)
+     , "Factory->load_factory_script(app.psgi)");
 }
 
 #----------------------------------------

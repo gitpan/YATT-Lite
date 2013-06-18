@@ -5,7 +5,7 @@ use Carp;
 use YATT::Lite::Breakpoint;
 sub MY () {__PACKAGE__}
 
-use 5.010; no if $] >= 5.018, warnings => "experimental";
+use 5.010; no if $] >= 5.017011, warnings => "experimental";
 
 #========================================
 # Dispatcher 層: Request に応じた DirApp をロードし起動する
@@ -14,12 +14,14 @@ use 5.010; no if $] >= 5.018, warnings => "experimental";
 use parent qw(YATT::Lite::Factory);
 use YATT::Lite::MFields qw/cf_noheader
 			   cf_is_psgi
+			   cf_no_nested_query
 			   allow_debug_from
 			   cf_debug_cgi
 			   cf_debug_psgi
 			   cf_debug_connection
 			   cf_debug_backend
 			   cf_psgi_static
+			   cf_psgi_fallback
 			   cf_index_name
 			   cf_backend
 			   cf_site_config
@@ -45,6 +47,7 @@ sub after_new {
   (my MY $self) = @_;
   $self->SUPER::after_new();
   $self->{cf_index_name} //= $self->default_index_name;
+  $self->{cf_use_subpath} //= 1;
 }
 
 sub _cf_delegates {
@@ -188,7 +191,7 @@ sub call {
   }
 
   unless (@pi) {
-    return [404, [], ["Cannot understand: ", $env->{PATH_INFO}]];
+    return $self->psgi_handle_fallback($env->{PATH_INFO});
   }
 
   my $virtdir = "$self->{cf_doc_root}$loc";
@@ -297,13 +300,41 @@ sub render {
 
 #========================================
 
+sub psgi_file_app {
+  my ($pack, $path) = @_;
+  require Plack::App::File;
+  Plack::App::File->new(root => $path)->to_app;
+}
+
 sub psgi_handle_static {
   (my MY $self, my Env $env) = @_;
-  my $app = $self->{cf_psgi_static} || do {
-    require Plack::App::File;
-    Plack::App::File->new(root => $self->{cf_doc_root})->to_app;
-  };
+  my $app = $self->{cf_psgi_static}
+    || $self->psgi_file_app($self->{cf_doc_root});
+
+  # When PATH_INFO contains virtual path prefix (like /~$user/),
+  # we need to strip them (for Plack::App::File).
+  local $env->{PATH_INFO} = $self->trim_site_prefix($env->{PATH_INFO});
+
   $app->($env);
+}
+
+sub psgi_handle_fallback {
+  (my MY $self, my Env $env) = @_;
+  my $app = $self->{cf_psgi_fallback}
+    or return [404, [], ["Cannot understand:", $env->{PATH_INFO}]];
+
+  local $env->{PATH_INFO} = $self->trim_site_prefix($env->{PATH_INFO});
+
+  $app->($env);
+}
+
+sub trim_site_prefix {
+  (my MY $self, my $path) = @_;
+  if (my $pfx = $self->{cf_site_prefix}) {
+    substr($path, length($pfx));
+  } else {
+    $path;
+  }
 }
 
 # XXX: Do we need to care about following headers too?:
@@ -457,7 +488,7 @@ sub connection_param {
 
    # May be overridden.
    , root => $self->{cf_doc_root}  # XXX: is this ok?
-   , $self->cf_delegate_defined(qw(is_psgi))
+   , $self->cf_delegate_defined(qw(is_psgi no_nested_query))
 
    # override by explict ones
    , @rest

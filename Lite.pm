@@ -1,10 +1,10 @@
 package YATT::Lite; sub MY () {__PACKAGE__}
 use strict;
 use warnings FATAL => qw(all);
-use 5.010; no if $] >= 5.018, warnings => "experimental";
+use 5.010; no if $] >= 5.017011, warnings => "experimental";
 
 use Carp qw(carp croak confess);
-our $VERSION = '0.0.6'; # ShipIt do not understand qv().
+our $VERSION = '0.0_7'; # ShipIt do not understand qv().
 #use mro 'c3';
 
 use Scalar::Util qw/weaken/;

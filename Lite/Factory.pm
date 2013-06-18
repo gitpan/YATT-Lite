@@ -8,8 +8,9 @@ sub MY () {__PACKAGE__}
 use 5.010;
 use Scalar::Util qw(weaken);
 
-use parent qw(YATT::Lite::NSBuilder File::Spec);
+use parent qw/YATT::Lite::NSBuilder File::Spec/;
 use File::Path ();
+use File::Basename qw/dirname/;
 
 use YATT::Lite::MFields qw/cf_doc_root
 			   cf_allow_missing_dir
@@ -31,8 +32,8 @@ use YATT::Lite::MFields qw/cf_doc_root
 
 			   cf_only_parse cf_namespace
 			   cf_offline
+			   cf_config_filetypes
 			  /;
-
 
 use YATT::Lite::Util::AsBase;
 use YATT::Lite::Util qw/lexpand globref untaint_any ckrequire dofile_in
@@ -40,7 +41,8 @@ use YATT::Lite::Util qw/lexpand globref untaint_any ckrequire dofile_in
 			secure_text_plain
 			psgi_error
 		       /;
-use YATT::Lite::XHF;
+
+use YATT::Lite::XHF ();
 
 use YATT::Lite::Partial::ErrorReporter;
 use YATT::Lite::Partial::AppPath;
@@ -131,6 +133,10 @@ sub configure_offline {
 sub load_factory_script {
   my ($pack, $fn) = @_;
   local $want_object = 1;
+  local $0 = $fn;
+  local ($FindBin::Bin, $FindBin::Script
+	 , $FindBin::RealBin, $FindBin::RealScript);
+  FindBin->again if FindBin->can("again");
   if ($fn =~ /\.psgi$/) {
     $pack->load_psgi_script($fn);
   } else {
@@ -213,14 +219,50 @@ sub load_yatt {
   if (not $self->{cf_allow_missing_dir} and not -d $path) {
     croak "Can't find '$path'!";
   }
-  if (-e (my $cf = untaint_any($path) . "/.htyattconfig.xhf")) {
-    _with_loading_file {$self} $cf, sub {
-      $self->build_yatt($path, $basedir, $cycle
-			, $self->read_file_xhf($cf, bytes => $self->{cf_binary_config}));
+  if (my (@cf) = map {
+    my $cf = untaint_any($path) . "/.htyattconfig.$_";
+    -e $cf ? $cf : ()
+  } $self->config_filetypes) {
+    $self->error("Multiple configuration files!", @cf) if @cf > 1;
+    _with_loading_file {$self} $cf[0], sub {
+      $self->build_yatt($path, $basedir, $cycle, $self->read_file($cf[0]));
     };
   } else {
     $self->build_yatt($path, $basedir, $cycle);
   }
+}
+
+sub read_file {
+  (my MY $self, my $fn) = @_;
+  my ($ext) = $fn =~ /\.(\w+)$/
+    or croak "Can't extract fileext from filename: $fn";
+  my $sub = $self->can("read_file_$ext")
+    or croak "filetype $ext is not supported: $fn";
+  $sub->($self, $fn);
+}
+
+sub default_config_filetypes {qw/xhf yml/}
+sub config_filetypes {
+  (my MY $self) = @_;
+  if (my $item = $self->{cf_config_filetypes}) {
+    lexpand($item)
+  } else {
+    $self->default_config_filetypes
+  }
+}
+
+sub read_file_xhf {
+  (my MY $self, my $fn) = @_;
+  my $bytes_semantics = ref $self && $self->{cf_binary_config};
+  $self->YATT::Lite::XHF::read_file_xhf
+    ($fn, bytes => $bytes_semantics);
+}
+
+sub read_file_yml {
+  (my MY $self, my $fn) = @_;
+  require YAML::Tiny;
+  my $yaml = YAML::Tiny->read($fn);
+  wantarray ? lexpand($yaml->[0]) : $yaml;
 }
 
 sub build_yatt {
@@ -355,7 +397,7 @@ sub app_name_for {
   (my MY $self, my ($path, $basedir)) = @_;
   ensure_slash($path);
   if ($basedir) {
-    ensure_slash($basedir = $self->rel2abs($basedir));
+    ensure_slash($basedir);
     $self->_extract_app_name($path, $basedir)
       // $self->error("Can't extract app_name path=%s, base=%s"
 		      , $path, $basedir);
@@ -375,7 +417,7 @@ sub _extract_app_name {
   (my MY $self, my ($path, $basedir)) = @_;
   my ($bs, $name) = unpack('A'.length($basedir).'A*', $path);
   return undef unless $bs eq $basedir;
-  $name =~ s{/+$}{};
+  $name =~ s{[/\\]+$}{};
   $name;
 }
 
@@ -388,7 +430,10 @@ sub ensure_slash {
   unless (defined $_[0] and $_[0] ne '') {
     $_[0] = '/';
   } else {
-    $_[0] =~ s{^/?(.*?)/?$}{/$1/}; # Both of start/end must be '/'.
+    my $abs = File::Spec->rel2abs($_[0]);
+    my $sep = $^O =~ /^MSWin/ ? "\\" : "/";
+    $abs =~ s{(?:\Q$sep\E)?$}{$sep}; # Should end with path-separator.
+    $_[0] = $abs;
   }
 }
 

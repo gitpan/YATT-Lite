@@ -2,6 +2,9 @@ package YATT::Lite::Util;
 use strict;
 use warnings FATAL => qw(all);
 
+use URI::Escape ();
+use Tie::IxHash;
+
 require Scalar::Util;
 
 {
@@ -15,32 +18,6 @@ require Scalar::Util;
 		     nonempty
 		     subname
 		   /;
-    our @EXPORT_OK = (@EXPORT, qw/cached_in split_path rootname dict_order
-				  lookup_path lookup_dir
-				  appname extname
-				  unique
-				  captured is_debugging callerinfo
-				  dofile_in compile_file_in
-				  url_encode url_decode
-				  url_encode_kv encode_query
-				  ostream
-				  read_file
-				  named_attr
-				  mk_http_status
-				  get_locale_encoding
-				  fields_hash
-				  list_isa
-				  set_inc
-				  look_for_globref
-				  try_invoke
-				  NIMPL
-
-				  shallow_copy
-				  incr_opt
-				  num_is_ge
-				  secure_text_plain
-				  psgi_error
-				/);
   }
   use Carp;
   sub numLines {
@@ -93,6 +70,14 @@ require Scalar::Util;
     } else {
       wantarray ? () : 0;
     }
+  }
+  sub lsearch (&@) {
+    my $sub = shift;
+    my $i = 0;
+    foreach (@_) {
+      return $i if $sub->($_);
+    } continue {$i++}
+    return;
   }
   # $fn:e
   sub extname { my $fn = shift; return $1 if $fn =~ s/\.(\w+)$// }
@@ -192,7 +177,11 @@ require Scalar::Util;
       if ($subpath =~ m{^/(\w+)(?:/|$)} and -e "$dir/$1.yatt") {
 	$subpath = substr($subpath, 1+length $1);
 	$file = "$1.yatt";
+      } elsif (-e "$dir/index.yatt") {
+	# index.yatt should subsume all subpath.
       } elsif ($subpath =~ s{^/([^/]+)$}{}) {
+	# Note: Actually, $file is not accesible in this case.
+	# This is just for better error diag.
 	$file = $1;
       }
     }
@@ -236,9 +225,9 @@ require Scalar::Util;
       $ext = ($cur =~ s/(\.[^\.]+)$// ? $1 : undef);
       foreach my $dir (@dirlist) {
 	my $base = "$dir$loc/$cur";
-	if (defined $ext) {
+	if (defined $ext and -r "$base$ext") {
 	  # If extension is specified and it is readable, use it.
-	  return ($dir, "$loc/", "$cur$ext", $pi) if -r "$base$ext";
+	  return ($dir, "$loc/", "$cur$ext", $pi);
 	} elsif ($pi =~ m{^/} and -d $base) {
 	  # path_info has '/' and directory exists.
 	  next; # candidate
@@ -246,7 +235,8 @@ require Scalar::Util;
 	  return ($dir, "$loc/", "$cur$want_ext", $pi);
 	} elsif ($use_subpath
 		 and -r (my $alt = "$dir$loc/$ixfn")) {
-	  return ($dir, "$loc/", $ixfn, "/$cur$pi", 1);
+	  $ext //= "";
+	  return ($dir, "$loc/", $ixfn, "/$cur$ext$pi", 1);
 	} else {
 	  # Neither dir nor $cur$want_ext exists, it should be ignored.
 	  undef $dir;
@@ -361,10 +351,26 @@ BEGIN {
 	  $$str;
 	} elsif (my $sub = UNIVERSAL::can($str, 'as_escaped')) {
 	  $sub->($str);
+	} elsif ($sub = UNIVERSAL::can($str, 'cf_pairs')) {
+	  ref($str).'->new('.(join(", ", map {
+	    my ($k, $v) = @$_;
+	    "$k => " . do {
+	      my $esc = escape($v);
+	      if (not defined $esc) {
+		'undef'
+	      } elsif ($esc eq '') {
+		"''"
+	      } else {
+		$esc;
+	      }
+	    };
+	  } $sub->($str))).')';
 	} else {
 	  # XXX: Is this secure???
 	  # XXX: Should be JSON?
-	  terse_dump($str);
+	  my $copy = terse_dump($str);
+	  $copy =~ s{([<\"])}{$escape{$1}}g; # XXX: Minimum. May be insecure.
+	  $copy;
 	}
       };
     }
@@ -392,23 +398,95 @@ sub named_attr {
     , 'YATT::Lite::Util::named_attr';
 }
 
-sub value_checked  { _value_checked($_[0], $_[1], checked => '') }
-sub value_selected { _value_checked($_[0], $_[1], selected => '') }
+{
+  # XXX: These functions are deprecated. Use att_value_in() instead.
 
-sub _value_checked {
-  my ($value, $hash, $then, $else) = @_;
-  sprintf q|value="%s"%s|, escape($value)
-    , _if_checked($hash, $value, $then, $else);
+  sub value_checked  { _value_checked($_[0], $_[1], checked => '') }
+  sub value_selected { _value_checked($_[0], $_[1], selected => '') }
+
+  sub _value_checked {
+    my ($value, $hash, $then, $else) = @_;
+    sprintf q|value="%s"%s|, escape($value)
+      , _if_checked($hash, $value, $then, $else);
+  }
+
+  sub _if_checked {
+    my ($in, $value, $then, $else) = @_;
+    $else //= '';
+    return $else unless defined $in;
+    if (ref $in ? $in->{$value // ''} : ($in eq $value)) {
+      " $then"
+    } else {
+      $else;
+    }
+  }
 }
 
-sub _if_checked {
-  my ($in, $value, $then, $else) = @_;
-  $else //= '';
-  return $else unless defined $in;
-  if (ref $in ? $in->{$value // ''} : ($in eq $value)) {
-    " $then"
-  } else {
-    $else;
+{
+  our %input_types = qw!select 0 radio 1 checkbox 2!;
+  sub att_value_in {
+    my ($in, $type, $name, $formal_value, $as_value) = @_;
+    defined (my $typeid = $input_types{$type})
+      or croak "Unknown type: $type";
+
+    unless (defined $name and $name ne '') {
+      croak "name is empty";
+    }
+
+    unless (defined $formal_value and $formal_value ne '') {
+      croak "value is empty";
+    }
+
+    my @res;
+
+    if ($type and $typeid) {
+      push @res, qq|type="$type"|;
+    }
+
+    if ($typeid) {
+      my $sfx = $typeid ? '['.escape($formal_value).']' : '';
+      push @res, qq|name="@{[escape($name)]}$sfx"|;
+    }
+
+    if (not $typeid) {
+      # select
+      push @res, qq|value="@{[escape($formal_value)]}"|;
+    } elsif ($as_value) {
+      # checkbox/radio, with explicit value
+      push @res, qq|value="@{[escape($as_value)]}"|;
+    }
+
+    if (find_value_in($in, $name, $formal_value)) {
+      push @res, $typeid ? "checked" : "selected";
+    }
+
+    join(" ", @res);
+  }
+
+  sub find_value_in {
+    my ($in, $name, $formal_value) = @_;
+
+    my $actual_value = do {
+      if (my $sub = $in->can("param")) {
+	$sub->($in, $name);
+      } elsif (ref $in eq 'HASH') {
+	$in->{$name};
+      } else {
+	croak "Can't extract parameter from $in";
+      }
+    };
+
+    if (not defined $actual_value) {
+      0
+    } elsif (not ref $actual_value) {
+      $actual_value eq $formal_value
+    } elsif (ref $actual_value eq 'HASH') {
+      $actual_value->{$formal_value};
+    } elsif (ref $actual_value eq 'ARRAY') {
+      defined lsearch {$_ eq $formal_value} @$actual_value
+    } else {
+      undef
+    }
   }
 }
 
@@ -510,12 +588,21 @@ sub dispatch_one {
   }
 }
 
+sub con_error {
+  my ($con, $err, @args) = @_;
+  if ($con->can("raise") and my $sub = $con->can("error")) {
+    $sub->($con, $err, @args)
+  } else {
+    sprintf $err, @args;
+  }
+}
+
 sub safe_render {
   my ($this, $con, $wspec, @args) = @_;
   my @nsegs = lexpand($wspec);
   my $wname = join _ => map {defined $_ ? $_ : ''} @nsegs;
   my $sub = $this->can("render_$wname")
-    or die $con->error("Can't find widget '%s'", $wname);
+    or die con_error($con, "Can't find widget '%s'", $wname);
   $sub->($this, $con, @args);
 }
 
@@ -623,6 +710,75 @@ sub secure_text_plain {
 sub psgi_error {
   my ($self, $status, $msg, @rest) = @_;
   return [$status, [$self->secure_text_plain, @rest], [$msg]];
+}
+
+sub ixhash {
+  tie my %hash, 'Tie::IxHash', @_;
+  \%hash;
+}
+
+# Ported from: Rack::Utils.parse_nested_query
+sub parse_nested_query {
+  return {} unless defined $_[0] and $_[0] ne '';
+  my ($enc) = $_[1];
+  my $params = ixhash();
+  foreach my $p (split /[;&]/, $_[0]) {
+    my ($k, $v) = map {
+      s/\+/ /g;
+      my $raw = URI::Escape::uri_unescape($_);
+      $enc ? Encode::decode($enc, $raw) : $raw;
+    } split /=/, $p, 2;
+    normalize_params($params, $k, $v) if defined $k;
+  }
+  $params;
+}
+
+sub normalize_params {
+  my ($params, $name, $v) = @_;
+  my ($k) = $name =~ m(\A[\[\]]*([^\[\]]+)\]*)
+    or return;
+
+  my $after = substr($name, length $&);
+
+  if ($after eq '') {
+    $params->{$k} = $v;
+  } elsif ($after eq "[]") {
+    my $item = $params->{$k} //= [];
+    croak "expected ARRAY (got ".(ref $item || 'String').") for param `$k'"
+      unless ref $item eq 'ARRAY';
+    push @$item, $v;
+  } elsif ($after =~ m(^\[\]\[([^\[\]]+)\]$) or $after =~ m(^\[\](.+)$)) {
+    my $child_key = $1;
+    my $item = $params->{$k} //= [];
+    croak "expected ARRAY (got ".(ref $item || 'String').") for param `$k'"
+      unless ref $item eq 'ARRAY';
+    if (@$item and ref $item->[-1] eq 'HASH'
+	and not exists $item->[-1]->{$child_key}) {
+      normalize_params($item->[-1], $child_key, $v);
+    } else {
+      push @$item, normalize_params(ixhash(), $child_key, $v);
+    }
+  } else {
+    my $item = $params->{$k} //= ixhash();
+    croak "expected HASH (got ".(ref $item || 'String').") for param `$k'"
+      unless ref $item eq 'HASH';
+    $params->{$k} = normalize_params($item, $after, $v);
+  }
+
+  $params;
+}
+
+#
+# to put all functions into @EXPORT_OK.
+#
+{
+  our @EXPORT_OK;
+  my $symtab = symtab(__PACKAGE__);
+  foreach my $name (grep {/^[a-z]/} keys %$symtab) {
+    my $glob = $symtab->{$name};
+    next unless *{$glob}{CODE};
+    push @EXPORT_OK, $name;
+  }
 }
 
 1;

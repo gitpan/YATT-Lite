@@ -24,10 +24,11 @@ BEGIN {
   }
 }
 #----------------------------------------
-use 5.010; no if $] >= 5.018, warnings => "experimental";
+use 5.010; no if $] >= 5.017011, warnings => "experimental";
 
+use Carp;
 use YATT::Lite::Breakpoint;
-use YATT::Lite::Util qw(ostream);
+use YATT::Lite::Util qw(ostream lexpand);
 use YATT::Lite::Test::XHFTest2; # To import Item class.
 use base qw(YATT::Lite::Test::XHFTest2); # XXX: Redundant, but required.
 
@@ -77,9 +78,24 @@ foreach my File $sect (@{$tests->{files}}) {
       my $T = defined $item->{cf_TITLE} ? "[$item->{cf_TITLE}]" : '';
 
       my $con = ostream(my $buffer);
-      eval {$dispatcher->cf_let([noheader => 0]
-				, runas => cgi => $con, \%env
-				, [$item->{cf_PARAM}])};
+      eval {
+	if ($item->{cf_BREAK}) {
+	  YATT::Lite::Breakpoint::breakpoint();
+	}
+	my $params = $item->{cf_PARAM};
+	if (defined $params) {
+	  if (ref $params eq 'ARRAY'
+	      and grep(ref $_ eq 'HASH', @$params)
+	      or ref $params eq 'HASH'
+	      and grep(ref $_ eq 'HASH', values %$params)) {
+	    croak "HASH value is not allowed in PARAM block!";
+	  }
+	}
+	$dispatcher->cf_let([noheader => 0
+			     , lexpand($item->{cf_SITE_CONFIG})]
+			    , runas => cgi => $con, \%env
+			    , [$params])
+      };
 
       my $header;
       if ($item->{cf_ERROR}) {

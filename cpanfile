@@ -10,7 +10,14 @@ requires 'List::Util' => 0;
 requires 'List::MoreUtils' => 0;
 requires 'Plack' => 0;
 requires 'version' => 0.77;
+requires 'parent' => 0;
+
+requires 'URI::Escape' => 0;
+requires 'Tie::IxHash' => 0; # For nested_query
+requires 'Devel::StackTrace' => 0;
+
 recommends 'YAML::Tiny' => 0;
+recommends 'Devel::StackTrace::WithLexicals' => 0.08;
 
 configure_requires 'Module::CPANfile';
 configure_requires 'Module::Build';

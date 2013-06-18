@@ -7,6 +7,21 @@ use fields qw/cf_docpath
 	      cf_mod_overlay
 	     /;
 
+sub after_new {
+  (my MY $self) = @_;
+  $self->SUPER::after_new;
+  $self->{cf_lang_available} //= [qw/en ja/];
+}
+
+Entity alt_lang => sub {
+  my ($this, $list) = @_;
+  $list //= do {
+    my MY $self = $this->YATT;
+    $self->{cf_lang_available};
+  };
+  $this->entity_alternative($this->entity_current_lang, $list);
+};
+
 Entity search_pod => sub {
   my ($this, $modname) = @_;
 
@@ -60,7 +75,7 @@ sub podtree {
   my ($yatt, $fn) = @_;
   require Pod::Simple::SimpleTree;
   my $parser = Pod::Simple::SimpleTree->new;
-  $parser->accept_targets(qw(html css code));
+  $parser->accept_targets(qw(html css code image));
   #XXX: open my $fh, "<:encoding(utf-8)", $fn or die "Can't open $fn: $!";
   my $tree = $parser->parse_file($fn)->root;
   &YATT::Lite::Breakpoint::breakpoint();

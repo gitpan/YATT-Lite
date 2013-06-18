@@ -19,6 +19,7 @@ use YATT::Lite::Types
 			     cf_BREAK
 			     cf_SAME_RESULT
 			     cf_PERL_MINVER
+			     cf_SITE_CONFIG
 			     cf_PARAM cf_HEADER cf_BODY cf_ERROR)]]);
 
 our @EXPORT;
@@ -172,7 +173,7 @@ sub resolve_in {
 }
 
 #========================================
-use 5.010; no if $] >= 5.018, warnings => "experimental";
+use 5.010; no if $] >= 5.017011, warnings => "experimental";
 
 sub mechanized {
   (my Tests $tests, my $mech) = @_;
@@ -267,6 +268,12 @@ sub mkformref_if_post {
   return unless $item->{cf_METHOD} eq 'POST';
   defined (my $ary = $item->{cf_PARAM})
     or return;
+  if (ref $ary eq 'ARRAY'
+      and grep(ref $_ eq 'HASH', @$ary)
+      or ref $ary eq 'HASH'
+      and grep(ref $_ eq 'HASH', values %$ary)) {
+    croak "HASH value is not allowed in PARAM block!";
+  }
   $ary;
 }
 
