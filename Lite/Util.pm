@@ -709,7 +709,7 @@ sub secure_text_plain {
 
 sub psgi_error {
   my ($self, $status, $msg, @rest) = @_;
-  return [$status, [$self->secure_text_plain, @rest], [$msg]];
+  return [$status, [$self->secure_text_plain, @rest], [escape($msg)]];
 }
 
 sub ixhash {
@@ -721,7 +721,7 @@ sub ixhash {
 sub parse_nested_query {
   return {} unless defined $_[0] and $_[0] ne '';
   my ($enc) = $_[1];
-  my $params = ixhash();
+  my $params = $_[2] // ixhash();
   foreach my $p (split /[;&]/, $_[0]) {
     my ($k, $v) = map {
       s/\+/ /g;

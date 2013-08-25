@@ -22,6 +22,7 @@ BEGIN {
   }
 }
 
+use Plack::Response;
 use HTTP::Request::Common;
 use YATT::Lite::WebMVC0::SiteApp;
 use YATT::Lite::PSGIEnv;
@@ -48,6 +49,8 @@ sub is_or_like($$;$) {
 	  , namespace => ['yatt', 'perl', 'js']
 	  , header_charset => 'utf-8'
 	  , use_subpath => 1
+	  , (psgi_fallback => YATT::Lite::WebMVC0::SiteApp
+	     ->psgi_file_app("$rootname.d.fallback"))
 	 )
       ->to_app;
 
@@ -86,20 +89,90 @@ END
      , ["/beta/world_line/baz", 200, $hello->(beta => "bazworld line")]
      , ["/beta/world_line.yatt/edit/1234", 200, $hello->(edit => "1234's world")]
      , ["/beta/world_line/edit/1234", 200, $hello->(edit => "1234's world")]
+
+     # psgi file handlers
+     , [[psgi_static => "/test.css"], 200, "* {font-size: x-large; }\n"]
+     , [[psgi_fallback => "/beta/fbck.html"], 200
+	, "<h2>Fallback contents, outside of document root</h2>\n"]
     ) {
-    my ($path, $code, $body, $header) = @$test;
+    unless (defined $test) {
+      &YATT::Lite::Breakpoint::breakpoint();
+      next;
+    }
+    my ($path_or_spec, $code, $body, $header) = @$test;
+    my ($theme, $path) = do {
+      if (ref $path_or_spec) {
+	("($path_or_spec->[0]) $path_or_spec->[1]", $path_or_spec->[1]);
+      } else {
+	($path_or_spec, $path_or_spec);
+      }
+    };
     my $tuple = do {
       my Env $env = Env->psgi_simple_env;
       $env->{PATH_INFO} = $path;
+      $env->{SCRIPT_NAME} = '';
       $app->($env);
     };
-    is $tuple->[0], $code, "[code] $path";
-    is_or_like join("", @{$tuple->[2]}), $body, "[body] $path";
+    is $tuple->[0], $code, "[code] $theme";
+    is_or_like join("", do {
+      if (ref $tuple->[2] eq 'ARRAY') {
+	@{$tuple->[2]}
+      } elsif (my $sub = $tuple->[2]->can("getlines")) {
+	$sub->($tuple->[2]);
+      } else {
+	die "Unknown tuple type: ". ref($tuple->[2]);
+      }
+    }), $body, "[body] $theme";
     if ($header and my @h = @$header) {
       my %header = @{$tuple->[1]};
       while (my ($key, $value) = splice @h, 0, 2) {
 	is_or_like $header{$key}, $value, "[header][$key] $path";
       }
+    }
+  }
+
+  {
+    my $path;
+    # For post
+    my $post_env = sub {
+      my ($path, $data) = @_;
+      my Env $env = Env->psgi_simple_env;
+      $env->{REQUEST_METHOD} = "POST";
+      if (($env->{PATH_INFO} = $path) =~ s/\?(.*)//) {
+	$env->{QUERY_STRING} = $1;
+      }
+      $env->{SCRIPT_NAME} = '';
+      $data //= "";
+      $env->{CONTENT_LENGTH} = length $data;
+      $env->{CONTENT_TYPE} = 'application/x-www-form-urlencoded';
+      open my $fh, '<', \ $data or die "Can't open memstream: $!";
+      $env->{'psgi.input'} = $fh;
+      $env;
+    };
+
+    {
+      my $theme = "POST ";
+      my $res = $app->($post_env->(my $p = "/?~~=qux", "any=data1"));
+      is $res->[0], 200, "$theme $p status";
+      like join("", @{$res->[2]}), qr/Qux!/, "$theme $p body";
+    }
+
+    {
+      my $theme = "POST redirect ";
+      my $p = "/?!!=redir";
+      my $res = Plack::Response->new
+	(@{$app->($post_env->($p, "z=w"))});
+      is $res->status, 302, "$theme $p status";
+      is $res->headers->header('Location'), "/qux", "$theme $p location";
+    }
+
+    {
+      my $theme = "render from action";
+      my $res = $app->($post_env->(my $p = "/?!!=hello", "any=data"));
+      is $res->[0], 200, "$theme $p status";
+      is_or_like join("", @{$res->[2]})
+	, $hello->(content => "World from action")
+	  , "$theme $p body";
     }
   }
 }

@@ -6,9 +6,10 @@ use Carp;
 use Hash::Util qw/lock_keys/;
 
 # XXX: MFields may be ok.
-use fields
+use YATT::Lite::MFields
   (# Incoming request. Should be filled by Dispatcher(Factory)
-   qw/cf_env cookies_in/
+    [cf_env => getter => [env => 'glob']]
+    , qw/cookies_in/
 
    # To debug liveness/leakage.
    , qw/cf_debug/
@@ -36,6 +37,13 @@ use fields
 
    # Invocation context
    , qw/cf_system cf_yatt cf_backend cf_dbh/
+
+   # Location quad and is_index flag
+   , qw/cf_dir cf_location cf_file cf_subpath
+	cf_is_index/
+
+   # Not used..
+   , qw/cf_root/
 
    # User's choice of message language.
    , qw/cf_lang/
@@ -110,14 +118,15 @@ sub configure_encoding {
 #========================================
 
 sub cget {
-  confess "Not enough argument" unless @_ == 2;
+  confess "Not enough arguments" if @_ < 2;
+  confess "Too many arguments" if @_ > 3;
   my PROP $prop = prop(my $glob = shift);
+  my ($name, $default) = @_;
   my $fields = fields_hash($glob);
-  my ($name) = @_;
   if (not exists $fields->{"cf_$name"}) {
     confess "No such config item '$name' in class " . ref $glob;
   }
-  $prop->{"cf_$name"};
+  $prop->{"cf_$name"} // $default;
 }
 
 sub configure {
@@ -326,7 +335,7 @@ sub rewind {
 }
 
 #========================================
-# Cookie support, based on CGI::Cookie (works under PSGI mode too)
+# (Possibly obsoleted) Cookie support, based on CGI::Cookie (works under PSGI mode too)
 
 sub cookies_in {
   my PROP $prop = (my $glob = shift)->prop;

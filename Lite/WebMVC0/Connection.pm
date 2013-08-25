@@ -4,19 +4,17 @@ use warnings FATAL => qw(all);
 use Carp;
 
 use base qw(YATT::Lite::Connection);
-use fields qw/cf_cgi
-	      cf_is_psgi cf_hmv
-	      params_hash
+use YATT::Lite::MFields
+(qw/cf_cgi
+    cf_is_psgi cf_hmv
+    params_hash
 
-	      cf_site_prefix
+    cf_site_prefix
 
-	      cf_dir cf_file cf_subpath
-	      cf_root cf_location
-	      cf_is_index
-	      cf_no_nested_query
+    cf_no_nested_query
 
-	      current_user
-	    /;
+    current_user
+   /);
 use YATT::Lite::Util qw(globref url_encode nonempty lexpand);
 use YATT::Lite::PSGIEnv;
 
@@ -97,7 +95,7 @@ sub param {
   } elsif (my $cgi = $prop->{cf_cgi}) {
     return $cgi->param(@_);
   } else {
-    croak "Neither Hash::Multivalue nor CGI is found in connection!";
+    croak "Neither Hash::MultiValue nor CGI is found in connection!";
   }
 }
 
@@ -124,8 +122,22 @@ sub convert_array_param_psgi {
   my PROP $prop = (my $glob = shift)->prop;
   my ($req) = @_;
   my Env $env = $prop->{cf_env};
-  my $qs = $req->raw_body || $env->{QUERY_STRING};
-  $prop->{params_hash} = YATT::Lite::Util::parse_nested_query($qs);
+  $prop->{params_hash} = do {
+    if ($env->{CONTENT_TYPE} and defined $env->{CONTENT_LENGTH}) {
+      my $body = YATT::Lite::Util::parse_nested_query($req->raw_body);
+      my $qs = YATT::Lite::Util::parse_nested_query($env->{QUERY_STRING});
+      foreach my $key (keys %$qs) {
+	if (exists $body->{$key}) {
+	  die $glob->error("Attempt to overwrite post param '%s' by qs"
+			   , $key);
+	}
+	$body->{$key} = $qs->{$key};
+      }
+      $body;
+    } else {
+      YATT::Lite::Util::parse_nested_query($env->{QUERY_STRING});
+    }
+  };
 }
 
 sub convert_array_param_cgi {
