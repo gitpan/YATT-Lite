@@ -12,29 +12,54 @@ use parent qw/YATT::Lite::NSBuilder File::Spec/;
 use File::Path ();
 use File::Basename qw/dirname/;
 
-use YATT::Lite::MFields qw/cf_doc_root
-			   cf_allow_missing_dir
-			   cf_app_base
-			   cf_site_prefix
-			   cf_index_name
+# Note: Definition of default values are not yet gathered here.
+# Some are in YATT::Lite, others are in YATT::Lite::Core, CGen.. and so on.
 
-			   tmpldirs
+use YATT::Lite::MFields
+([cf_namespace =>
+  (doc => "namespace prefix for yatt. (default: [yatt, perl])")]
 
-			   loc2yatt
-			   path2yatt
+ , [cf_doc_root =>
+    (doc => "Primary template directory")]
 
-			   tmpl_cache
+ , [cf_app_base =>
+    (doc => "Base dir for this siteapp")]
 
-			   cf_binary_config
+ , [cf_site_prefix =>
+    (doc => "Location prefix for this siteapp")]
 
-			   cf_tmpl_encoding cf_output_encoding
-			   cf_header_charset
-			   cf_debug_cgen
+ , [cf_index_name =>
+    (doc => "Rootname of index template. (default: index)")]
 
-			   cf_only_parse cf_namespace
-			   cf_offline
-			   cf_config_filetypes
-			  /;
+ , [cf_header_charset =>
+    (doc => "Charset for outgoing HTTP Content-Type. (default: utf-8)")]
+
+ , [cf_tmpl_encoding =>
+    (doc => "Perl encoding used while reading yatt templates. (default: '')")]
+
+ , [cf_output_encoding =>
+    (doc => "Perl encoding used for outgoing response body. (default: '')")]
+
+ , [cf_offline =>
+    (doc => "Whether header should be emitted or not.")]
+
+ , [cf_binary_config   =>
+    (doc => "(This may be changed in future release) Whether .htyattconfig.* should be read with encoding or not.")]
+
+ , qw/
+       cf_allow_missing_dir
+
+       tmpldirs
+       loc2yatt
+       path2yatt
+
+       tmpl_cache
+
+       cf_debug_cgen
+
+       cf_only_parse
+       cf_config_filetypes
+     /);
 
 use YATT::Lite::Util::AsBase;
 use YATT::Lite::Util qw/lexpand globref untaint_any ckrequire dofile_in
@@ -50,6 +75,9 @@ use YATT::Lite::Partial::ErrorReporter;
 use YATT::Lite::Partial::AppPath;
 
 use YATT::Lite qw/Entity *SYS *YATT *CON/;
+
+
+use YATT::Lite::Util::CycleDetector qw/Visits/;
 
 #========================================
 #
@@ -84,6 +112,42 @@ sub configure_offline {
   }
 }
 
+#========================================
+
+sub load_factory_for_psgi {
+  my ($pack, $psgi, %default) = @_;
+  unless (defined $psgi) {
+    croak "Usage: Factory->load_factory_for_psgi(psgi_filename, \%opts)";
+  }
+  unless (-r $psgi) {
+    croak "psgi is not readable: $psgi";
+  }
+  (my $app_rootname = $pack->rel2abs($psgi)) =~ s/\.psgi$//;
+  my $app_root = dirname($app_rootname);
+  unless (-d $app_root) {
+    croak "Can't find app_root for $psgi";
+  }
+
+  $default{doc_root} ||= "$app_root/html";
+  if (-d "$app_root/ytmpl") {
+    $default{app_base} ||= '@ytmpl';
+  }
+  if (my (@cf) = map {
+    my $cf = "$app_rootname.$_";
+    -e $cf ? $cf : ()
+  } $pack->default_config_filetypes) {
+    croak "Multiple configuration files!: @cf" if @cf > 1;
+    $pack->_with_loading_file($cf[0], sub {
+				$pack->new(app_root => $app_root, %default
+					   , $pack->read_file($cf[0]));
+			      })
+  } else {
+    $pack->new(app_root => $app_root, %default);
+  }
+}
+
+#========================================
+
 {
   my %sub2app;
   sub to_app {
@@ -106,7 +170,7 @@ sub configure_offline {
     my $sub = $pack->sandbox_dofile($fn);
     if (ref $sub eq 'CODE') {
       $sub2app{$sub};
-    } elsif ($sub->isa($pack)) {
+    } elsif ($sub->isa($pack) or $sub->isa(MY)) {
       $sub;
     } else {
       die "Unknown load result from: $fn";
@@ -167,6 +231,18 @@ sub init_app_ns {
   $self->{default_app}->ensure_entns($self->{app_ns});
 }
 
+sub after_new {
+  (my MY $self) = @_;
+  $self->SUPER::after_new;
+  $self->{cf_output_encoding} //= $self->default_output_encoding;
+  $self->{cf_header_charset} //= (
+    $self->{cf_output_encoding} || $self->default_header_charset
+  );
+}
+
+sub default_output_encoding { '' }
+sub default_header_charset  { 'utf-8' }
+
 sub _after_after_new {
   (my MY $self) = @_;
   $self->SUPER::_after_after_new;
@@ -226,6 +302,10 @@ sub render {
   $con->buffer;
 }
 
+#========================================
+
+sub Connection () {'YATT::Lite::Connection'};
+
 sub make_simple_connection {
   (my MY $self, my ($quad, @rest)) = @_;
   my ($tmpldir, $loc, $file, $trailer) = @$quad;
@@ -238,6 +318,49 @@ sub make_simple_connection {
 sub make_debug_params {
   (my MY $self, my ($reqrec, $args)) = @_;
   ();
+}
+
+sub make_connection {
+  (my MY $self, my ($fh, @params)) = @_;
+  require YATT::Lite::Connection;
+  $self->Connection->create(
+    $fh, @params, system => $self, root => $self->{cf_doc_root}
+ );
+}
+
+sub finalize_connection {}
+
+sub connection_param {
+  croak "Use of YATT::Lite::Factory::connection_param is deprecated!\n";
+}
+sub connection_quad {
+  (my MY $self, my ($quad)) = @_;
+  my ($virtdir, $loc, $file, $subpath) = @$quad;
+  (dir => $virtdir
+   , location => $loc
+   , file => $file
+   , subpath => $subpath);
+}
+
+#========================================
+#
+# Hook for subclassing
+#
+sub run_dirhandler {
+  (my MY $self, my ($dh, $con, $file)) = @_;
+  local ($SYS, $YATT, $CON) = ($self, $dh, $con);
+  $self->before_dirhandler($dh, $con, $file);
+  $self->invoke_dirhandler($dh, $con
+			   , handle => $dh->cut_ext($file), $con, $file);
+  $self->after_dirhandler($dh, $con, $file);
+}
+
+sub before_dirhandler { &maybe::next::method; }
+sub after_dirhandler  { &maybe::next::method; }
+
+sub invoke_dirhandler {
+  (my MY $self, my ($dh, $con, $method, @args)) = @_;
+  $dh->with_system($self, $method, @args);
 }
 
 #========================================
@@ -269,13 +392,18 @@ sub get_yatt {
 # phys-path => yatt
 
 sub load_yatt {
-  (my MY $self, my ($path, $basedir, $cycle)) = @_;
+  (my MY $self, my ($path, $basedir, $visits, $from)) = @_;
   $path = $self->rel2abs($path, $self->{cf_app_root});
   if (my $yatt = $self->{path2yatt}{$path}) {
     return $yatt;
   }
-  $cycle //= {};
-  $cycle->{$path} = keys %$cycle;
+  if (not $visits) {
+    $visits = Visits->start($path);
+  } elsif (my $preds = $visits->check_cycle($path, $from)) {
+    $self->error("Template config error! base has cycle!:\n     %s\n"
+		 , join "\n  -> ", $from, @$preds);
+  }
+  #-- DFS-visits --
   if (not $self->{cf_allow_missing_dir} and not -d $path) {
     croak "Can't find '$path'!";
   }
@@ -285,48 +413,15 @@ sub load_yatt {
   } $self->config_filetypes) {
     $self->error("Multiple configuration files!", @cf) if @cf > 1;
     _with_loading_file {$self} $cf[0], sub {
-      $self->build_yatt($path, $basedir, $cycle, $self->read_file($cf[0]));
+      $self->build_yatt($path, $basedir, $visits, $self->read_file($cf[0]));
     };
   } else {
-    $self->build_yatt($path, $basedir, $cycle);
+    $self->build_yatt($path, $basedir, $visits);
   }
-}
-
-sub read_file {
-  (my MY $self, my $fn) = @_;
-  my ($ext) = $fn =~ /\.(\w+)$/
-    or croak "Can't extract fileext from filename: $fn";
-  my $sub = $self->can("read_file_$ext")
-    or croak "filetype $ext is not supported: $fn";
-  $sub->($self, $fn);
-}
-
-sub default_config_filetypes {qw/xhf yml/}
-sub config_filetypes {
-  (my MY $self) = @_;
-  if (my $item = $self->{cf_config_filetypes}) {
-    lexpand($item)
-  } else {
-    $self->default_config_filetypes
-  }
-}
-
-sub read_file_xhf {
-  (my MY $self, my $fn) = @_;
-  my $bytes_semantics = ref $self && $self->{cf_binary_config};
-  $self->YATT::Lite::XHF::read_file_xhf
-    ($fn, bytes => $bytes_semantics);
-}
-
-sub read_file_yml {
-  (my MY $self, my $fn) = @_;
-  require YAML::Tiny;
-  my $yaml = YAML::Tiny->read($fn);
-  wantarray ? lexpand($yaml->[0]) : $yaml;
 }
 
 sub build_yatt {
-  (my MY $self, my ($path, $basedir, $cycle, %opts)) = @_;
+  (my MY $self, my ($path, $basedir, $visits, %opts)) = @_;
   trim_slash($path);
 
   my $app_name = $self->app_name_for($path, $basedir);
@@ -335,11 +430,8 @@ sub build_yatt {
   # base package と base vfs object の決定
   #
   my (@basepkg, @basevfs);
-  if (my $explicit = delete $opts{base}) {
-    $self->_list_base_spec_in($path,$explicit, 0, $cycle, \@basepkg, \@basevfs);
-  } elsif (my $default = $self->{cf_app_base}) {
-    $self->_list_base_spec_in($path, $default, 1, $cycle, \@basepkg, \@basevfs);
-  }
+  $self->_list_base_spec_in($path, delete $opts{base}, $visits
+			    , \@basepkg, \@basevfs);
 
   my $app_ns = $self->buildns(INST => \@basepkg, $path);
 
@@ -371,37 +463,49 @@ sub build_yatt {
 }
 
 sub _list_base_spec_in {
-  (my MY $self, my ($in, $desc, $is_default, $cycle, $basepkg, $basevfs)) = @_;
+  (my MY $self, my ($in, $desc, $visits, $basepkg, $basevfs)) = @_;
+
+  my $is_implicit = not defined $desc;
+
+  $desc //= $self->{cf_app_base};
+
   my ($base, @mixin) = lexpand($desc)
     or return;
 
+  my @pkg_n_dir;
   foreach my $task ([1, $base], [0, @mixin]) {
-    my ($primary, @spec) = @$task;
+    my ($is_primary, @spec) = @$task;
     foreach my $basespec (@spec) {
       my ($pkg, $yatt);
       if ($basespec =~ /^::(.*)/) {
 	ckrequire($1);
-	$pkg = $1;
+	push @pkg_n_dir, [$is_primary, $1, undef];
       } elsif (my $realpath = $self->app_path_find_dir_in($in, $basespec)) {
-	if (defined $cycle->{$realpath}) {
-	  next if $is_default;
-	  $self->error("Template config error! base has cycle!: %s\n"
-		       , join("\n  -> ", (sort {$cycle->{$a} <=> $cycle->{$b}}
-					  keys %$cycle)
-			     , $realpath));
+	if ($is_implicit) {
+	  next if $visits->has_node($realpath);
 	}
-	$yatt = $self->load_yatt($realpath, undef, $cycle);
-	$pkg = ref $yatt;
+	$visits->ensure_make_node($realpath);
+	push @pkg_n_dir, [$is_primary, undef, $realpath];
       } else {
 	$self->error("Invalid base spec: %s", $basespec);
       }
-      if (not $primary and $pkg->isa('YATT::Lite::Object')) {
-	# XXX: This will cause inheritance error. But...
-      }
-      push @$basepkg, $pkg if $primary;
-      push @$basevfs, [dir => $yatt->cget('dir')] if $yatt;
     }
   }
+
+  foreach my $tuple (@pkg_n_dir) {
+    my ($is_primary, $pkg, $dir) = @$tuple;
+    next unless $dir;
+    my $yatt = $self->load_yatt($dir, undef, $visits, $in);
+    $tuple->[1] = ref $yatt;
+    push @$basevfs, [dir => $yatt->cget('dir')];
+  }
+
+  push @$basepkg, map {
+    my ($is_primary, $pkg, $dir) = @$_;
+    ($is_primary && $pkg) ? ($pkg) : ()
+  } @pkg_n_dir;
+
+  $visits->finish_node($in);
 }
 
 #========================================
@@ -481,6 +585,43 @@ sub _extract_app_name {
   $name;
 }
 
+#========================================
+
+sub read_file {
+  (my MY $self, my $fn) = @_;
+  my ($ext) = $fn =~ /\.(\w+)$/
+    or croak "Can't extract fileext from filename: $fn";
+  my $sub = $self->can("read_file_$ext")
+    or croak "filetype $ext is not supported: $fn";
+  $sub->($self, $fn);
+}
+
+sub default_config_filetypes {qw/xhf yml/}
+sub config_filetypes {
+  (my MY $self) = @_;
+  if (my $item = $self->{cf_config_filetypes}) {
+    lexpand($item)
+  } else {
+    $self->default_config_filetypes
+  }
+}
+
+sub read_file_xhf {
+  (my MY $self, my $fn) = @_;
+  my $bytes_semantics = ref $self && $self->{cf_binary_config};
+  $self->YATT::Lite::XHF::read_file_xhf
+    ($fn, bytes => $bytes_semantics);
+}
+
+sub read_file_yml {
+  (my MY $self, my $fn) = @_;
+  require YAML::Tiny;
+  my $yaml = YAML::Tiny->read($fn);
+  wantarray ? lexpand($yaml->[0]) : $yaml;
+}
+
+#========================================
+
 sub trim_slash {
   $_[0] =~ s,/*$,,;
   $_[0];
@@ -495,52 +636,6 @@ sub ensure_slash {
     $abs =~ s{(?:\Q$sep\E)?$}{$sep}; # Should end with path-separator.
     $_[0] = $abs;
   }
-}
-
-#========================================
-sub Connection () {'YATT::Lite::Connection'};
-
-sub make_connection {
-  (my MY $self, my ($fh, @params)) = @_;
-  require YATT::Lite::Connection;
-  $self->Connection->create(
-    $fh, @params, system => $self, root => $self->{cf_doc_root}
- );
-}
-
-sub finalize_connection {}
-
-sub connection_param {
-  croak "Use of YATT::Lite::Factory::connection_param is deprecated!\n";
-}
-sub connection_quad {
-  (my MY $self, my ($quad)) = @_;
-  my ($virtdir, $loc, $file, $subpath) = @$quad;
-  (dir => $virtdir
-   , location => $loc
-   , file => $file
-   , subpath => $subpath);
-}
-
-#========================================
-#
-# Hook for subclassing
-#
-sub run_dirhandler {
-  (my MY $self, my ($dh, $con, $file)) = @_;
-  local ($SYS, $YATT, $CON) = ($self, $dh, $con);
-  $self->before_dirhandler($dh, $con, $file);
-  $self->invoke_dirhandler($dh, $con
-			   , handle => $dh->cut_ext($file), $con, $file);
-  $self->after_dirhandler($dh, $con, $file);
-}
-
-sub before_dirhandler { &maybe::next::method; }
-sub after_dirhandler  { &maybe::next::method; }
-
-sub invoke_dirhandler {
-  (my MY $self, my ($dh, $con, $method, @args)) = @_;
-  $dh->with_system($self, $method, @args);
 }
 
 #========================================

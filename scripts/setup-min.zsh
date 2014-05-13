@@ -43,6 +43,8 @@ opt_spec=(
     x=o_xtrace
     n=o_dryrun
     q=o_quiet
+    C=o_clean
+    -setup=o_try_setup
 )
 
 zparseopts -D -A opts $opt_spec
@@ -188,6 +190,13 @@ else
     die Can\'t extract URL from destdir=$destdir.
 fi
 
+# SELinux check.
+if (($+commands[selinuxenabled])) && selinuxenabled; then
+    is_selinux=1
+else
+    is_selinux=0
+fi
+
 #========================================
 # Main.
 #========================================
@@ -200,6 +209,9 @@ else
 fi
 
 x install -m $cgi_bin_perm $samplecgi $cgi_bin/$driver_name.cgi
+if (($is_selinux)); then
+    x chcon $o_verbose -t httpd_${install_type}_script_exec_t $cgi_bin/$driver_name.cgi || true
+fi
 
 dn=$cgi_bin/$driver_name.ytmpl
 if ! [[ -e $dn ]]; then
@@ -211,6 +223,29 @@ x ln $o_verbose -nsf $driver_name.cgi $cgi_bin/$driver_name.fcgi
 mkfile $cgi_bin/.htaccess <<EOF
 Options +ExecCGI
 EOF
+
+dn=$destdir/../var
+if [[ -d $dn ]]; then
+    dirs=($dn/*/tmp(/N))
+    if (($#dirs && $#o_clean)); then
+	rm -rf $dirs
+    fi
+    x chgrp -R $APACHE_RUN_GROUP $dn
+    if (($#dirs && $#o_clean)); then
+	mkdir -p $dirs
+    fi
+    if (($is_selinux)); then
+	x chcon $o_verbose -R -t httpd_${install_type}_script_rw_t $dn
+    fi
+fi
+
+if (($#o_try_setup)); then
+    top_app=$destdir/html/.htyattrc.pl
+    if [[ -r $top_app ]]; then
+	# XXX: This can fail second time, mmm...
+	x $realbin/yatt.command -d $top_app:h --if_can setup
+    fi
+fi
 
 # Then activate it!
 if [[ -r $destdir/dot.htaccess ]]; then

@@ -1,4 +1,4 @@
-YATT::Lite - Template with "use strict"
+YATT::Lite - Template with "use strict" [![Build Status](https://travis-ci.org/hkoba/yatt_lite.png?branch=dev)](https://travis-ci.org/hkoba/yatt_lite)
 ==================
 
 YATT is Yet Another Template Toolkit, strongly aimed at **static checking of
@@ -26,7 +26,7 @@ Following is an example of valid yatt template:
 <!yatt:args who content>
 <h2>Hello &yatt:who;!</h2>
 <p>&yatt:content;</p>
-<yatt:myfooter mycomp=who/>
+<yatt:myfooter mycomp=who />
 
 <!yatt:widget myfooter mycomp="?My Company">
 &copy; 2013 &yatt:mycomp;, Inc.

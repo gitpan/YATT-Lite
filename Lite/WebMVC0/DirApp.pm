@@ -34,7 +34,7 @@ sub handle {
   local $SIG{__DIE__} = sub {
     my ($err) = @_;
     die $err if ref $err;
-    die $self->error({ignore_frame => [MY,__FILE__, __LINE__]}, $err);
+    die $self->error({ignore_frame => [undef, __FILE__, __LINE__]}, $err);
   };
   if (my $charset = $self->header_charset) {
     $con->set_charset($charset);
@@ -184,7 +184,7 @@ sub error_handler {
   };
   $sub->($pkg, $errcon, $err);
   try_invoke($errcon, 'flush_headers');
-  $self->DONE; # XXX: bailout と分けるべき
+  $self->raise_psgi_html(200, $errcon->buffer); # ->DONE was not ok.
 }
 
 Entity dir_config => sub {
